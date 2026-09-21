@@ -126,7 +126,7 @@ client = Cortiqa(
     api_key="sk-cortiqa-...",                # Default: CORTIQA_API_KEY
     base_url="https://api.cortiqa.co",       # Default: https://api.cortiqa.co
     timeout=60.0,                            # Request timeout in seconds
-    max_retries=2,                           # Auto-retries on transient failures
+    max_retries=2,                           # Auto-retries on transient failuress
 )
 ```
 

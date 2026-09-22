@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortiqa"
-version = "0.1.0"
+version = "0.1.1"
 description = "Official Python client library for Cortiqa AI & Falin Foundation Models"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -44,3 +44,7 @@ Homepage = "https://cortiqa.co"
 Documentation = "https://github.com/cortiqa-ai/cortiqa-docs"
 Repository = "https://github.com/cortiqa-ai/cortiqa-sdk-python"
 "Bug Tracker" = "https://github.com/cortiqa-ai/cortiqa-sdk-python/issues"
+
+[tool.setuptools.packages.find]
+include = ["cortiqa*"]
+exclude = ["tests*"]

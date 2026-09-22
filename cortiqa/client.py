@@ -9,9 +9,11 @@ import httpx
 from cortiqa.exceptions import (
     CortiqaError,
     APIError,
+    BadRequestError,
     AuthenticationError,
     PermissionDeniedError,
     NotFoundError,
+    UnprocessableEntityError,
     RateLimitError,
     InternalServerError,
     APIConnectionError,
@@ -29,13 +31,65 @@ from cortiqa.version import __version__
 DEFAULT_BASE_URL = "https://api.cortiqa.co"
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 2
+DEFAULT_MODEL = "openai/gpt-oss-120b"
+
+
+def _extract_error_details(response: httpx.Response) -> tuple[str, Optional[str], Optional[str], Optional[str], Optional[Any]]:
+    """Extract (message, param, code, error_type, body) from error response."""
+    status_code = response.status_code
+    param: Optional[str] = None
+    code: Optional[str] = None
+    error_type: Optional[str] = None
+    body: Optional[Any] = None
+
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                message = err.get("message")
+                param = err.get("param")
+                code = err.get("code")
+                error_type = err.get("type")
+            elif isinstance(err, str):
+                message = err
+            else:
+                message = None
+
+            # Handle FastAPI/Pydantic validation error lists
+            if not message and isinstance(body.get("detail"), list) and body["detail"]:
+                first_err = body["detail"][0]
+                if isinstance(first_err, dict):
+                    loc = first_err.get("loc", [])
+                    if loc:
+                        param = str(loc[-1])
+                    msg = first_err.get("msg")
+                    error_type = first_err.get("type")
+                    if param and msg:
+                        message = f"Parameter '{param}': {msg}"
+                    else:
+                        message = msg
+
+            if not message:
+                message = body.get("message") or response.text
+    except Exception:
+        body = None
+        message = response.text or f"HTTP {status_code} Error"
+
+    if not message:
+        message = f"HTTP {status_code} Error"
+
+    if param and f"'{param}'" not in message and f"[{param}]" not in message:
+        message = f"[{param}] {message}"
+
+    return message, param, code, error_type, body
 
 
 class Cortiqa:
     """Synchronous client for Cortiqa AI APIs.
 
     Supports both OpenAI style (`client.chat.completions.create(...)`)
-    and Anthropic style (`client.messages.create(...)`).
+    and Anthropic style (`client.messages.create(...)`), plus one-liner `client.prompt(...)`.
 
     Example:
         ```python
@@ -43,17 +97,12 @@ class Cortiqa:
 
         client = Cortiqa(api_key="sk-cortiqa-...")
 
-        # Option A: Anthropic style
-        message = client.messages.create(
-            model="falin-01",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": "Hello Cortiqa!"}]
-        )
-        print(message.content)
+        # Option A: One-liner prompt
+        answer = client.prompt("Explain quantum computing in 1 sentence.")
+        print(answer)
 
         # Option B: OpenAI style
         completion = client.chat.completions.create(
-            model="falin-01",
             messages=[{"role": "user", "content": "Hello Cortiqa!"}]
         )
         print(completion.choices[0].message.content)
@@ -67,6 +116,7 @@ class Cortiqa:
         base_url: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        default_model: str = DEFAULT_MODEL,
         http_client: Optional[httpx.Client] = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("CORTIQA_API_KEY")
@@ -79,6 +129,7 @@ class Cortiqa:
         self.base_url = raw_base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        self.default_model = default_model
 
         self._headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -96,33 +147,68 @@ class Cortiqa:
         self.messages = MessagesResource(self)
         self.models = ModelsResource(self)
 
+    def prompt(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str] = None,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **extra_params: Any,
+    ) -> str:
+        """Convenience shortcut to send a prompt and get the text response directly.
+
+        Example:
+            answer = client.prompt("Explain quantum computing in 1 sentence.")
+            print(answer)
+        """
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        completion = self.chat.completions.create(
+            model=model or self.default_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **extra_params,
+        )
+        return completion.content
+
     def _handle_response_status(self, response: httpx.Response) -> None:
         """Inspect HTTP response and raise appropriate typed exception on error."""
         if response.is_success:
             return
 
         status_code = response.status_code
-        try:
-            body = response.json()
-            message = body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body.get("error")
-            if not message:
-                message = body.get("message") or response.text
-        except Exception:
-            body = None
-            message = response.text or f"HTTP {status_code} Error"
+        message, param, code, error_type, body = _extract_error_details(response)
 
+        kwargs = {
+            "status_code": status_code,
+            "body": body,
+            "param": param,
+            "code": code,
+            "error_type": error_type,
+        }
+
+        if status_code == 400:
+            raise BadRequestError(message, **kwargs)
         if status_code == 401:
-            raise AuthenticationError(message, status_code=status_code, body=body)
+            raise AuthenticationError(message, **kwargs)
         if status_code == 403:
-            raise PermissionDeniedError(message, status_code=status_code, body=body)
+            raise PermissionDeniedError(message, **kwargs)
         if status_code == 404:
-            raise NotFoundError(message, status_code=status_code, body=body)
+            raise NotFoundError(message, **kwargs)
+        if status_code == 422:
+            raise UnprocessableEntityError(message, **kwargs)
         if status_code == 429:
-            raise RateLimitError(message, status_code=status_code, body=body)
+            raise RateLimitError(message, **kwargs)
         if status_code >= 500:
-            raise InternalServerError(message, status_code=status_code, body=body)
+            raise InternalServerError(message, **kwargs)
 
-        raise APIError(message, status_code=status_code, body=body)
+        raise APIError(message, **kwargs)
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         url = f"{self.base_url}{path}"
@@ -201,6 +287,7 @@ class AsyncCortiqa:
         base_url: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        default_model: str = DEFAULT_MODEL,
         http_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("CORTIQA_API_KEY")
@@ -213,6 +300,7 @@ class AsyncCortiqa:
         self.base_url = raw_base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        self.default_model = default_model
 
         self._headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -230,33 +318,68 @@ class AsyncCortiqa:
         self.messages = AsyncMessagesResource(self)
         self.models = AsyncModelsResource(self)
 
+    async def prompt(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str] = None,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **extra_params: Any,
+    ) -> str:
+        """Asynchronously send a prompt and return the text response directly.
+
+        Example:
+            answer = await client.prompt("Explain quantum computing in 1 sentence.")
+            print(answer)
+        """
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        completion = await self.chat.completions.create(
+            model=model or self.default_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **extra_params,
+        )
+        return completion.content
+
     def _handle_response_status(self, response: httpx.Response) -> None:
         """Inspect HTTP response and raise appropriate typed exception on error."""
         if response.is_success:
             return
 
         status_code = response.status_code
-        try:
-            body = response.json()
-            message = body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body.get("error")
-            if not message:
-                message = body.get("message") or response.text
-        except Exception:
-            body = None
-            message = response.text or f"HTTP {status_code} Error"
+        message, param, code, error_type, body = _extract_error_details(response)
 
+        kwargs = {
+            "status_code": status_code,
+            "body": body,
+            "param": param,
+            "code": code,
+            "error_type": error_type,
+        }
+
+        if status_code == 400:
+            raise BadRequestError(message, **kwargs)
         if status_code == 401:
-            raise AuthenticationError(message, status_code=status_code, body=body)
+            raise AuthenticationError(message, **kwargs)
         if status_code == 403:
-            raise PermissionDeniedError(message, status_code=status_code, body=body)
+            raise PermissionDeniedError(message, **kwargs)
         if status_code == 404:
-            raise NotFoundError(message, status_code=status_code, body=body)
+            raise NotFoundError(message, **kwargs)
+        if status_code == 422:
+            raise UnprocessableEntityError(message, **kwargs)
         if status_code == 429:
-            raise RateLimitError(message, status_code=status_code, body=body)
+            raise RateLimitError(message, **kwargs)
         if status_code >= 500:
-            raise InternalServerError(message, status_code=status_code, body=body)
+            raise InternalServerError(message, **kwargs)
 
-        raise APIError(message, status_code=status_code, body=body)
+        raise APIError(message, **kwargs)
 
     async def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         url = f"{self.base_url}{path}"

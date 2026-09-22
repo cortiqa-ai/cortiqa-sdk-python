@@ -51,7 +51,7 @@ class StreamManager:
             id=self._id or "chatcmpl-streamed",
             object="chat.completion",
             created=0,
-            model=self._model or "falin-01",
+            model=self._model or "openai/gpt-oss-120b",
             choices=[
                 ChatCompletionChoice(
                     index=0,
@@ -104,7 +104,7 @@ class AsyncStreamManager:
             id=self._id or "chatcmpl-streamed",
             object="chat.completion",
             created=0,
-            model=self._model or "falin-01",
+            model=self._model or "openai/gpt-oss-120b",
             choices=[
                 ChatCompletionChoice(
                     index=0,
@@ -122,6 +122,57 @@ class AsyncStreamManager:
         pass
 
 
+def _normalize_messages(messages: List[Union[Dict[str, Any], ChatMessage]]) -> List[Dict[str, Any]]:
+    """Ensure all messages are serializable dicts (handling Pydantic ChatMessage objects)."""
+    normalized: List[Dict[str, Any]] = []
+    for msg in messages:
+        if hasattr(msg, "model_dump"):
+            dumped = msg.model_dump(exclude_none=True)
+            normalized.append(dumped)
+        elif isinstance(msg, dict):
+            normalized.append(msg)
+        else:
+            normalized.append(msg)
+    return normalized
+
+
+def _normalize_tools(tools: Optional[List[Union[Dict[str, Any], Any]]]) -> Optional[List[Dict[str, Any]]]:
+    """Ensure tools are in the expected OpenAI schema: {"type": "function", "function": {...}}."""
+    if tools is None:
+        return None
+    normalized: List[Dict[str, Any]] = []
+    for tool in tools:
+        if hasattr(tool, "model_dump"):
+            t_dict = tool.model_dump(exclude_none=True)
+        elif isinstance(tool, dict):
+            t_dict = dict(tool)
+        else:
+            t_dict = tool
+
+        if isinstance(t_dict, dict):
+            if t_dict.get("type") == "function" and "function" in t_dict:
+                normalized.append(t_dict)
+            elif "function" in t_dict and "type" not in t_dict:
+                normalized.append({"type": "function", "function": t_dict["function"]})
+            elif "name" in t_dict and "function" not in t_dict:
+                desc = t_dict.get("description")
+                params = t_dict.get("parameters", {})
+                func_dict: Dict[str, Any] = {"name": t_dict["name"]}
+                if desc is not None:
+                    func_dict["description"] = desc
+                if params is not None:
+                    func_dict["parameters"] = params
+                normalized.append({
+                    "type": "function",
+                    "function": func_dict,
+                })
+            else:
+                normalized.append(t_dict)
+        else:
+            normalized.append(t_dict)
+    return normalized
+
+
 class CompletionsResource:
     """Synchronous chat completions manager."""
 
@@ -131,21 +182,21 @@ class CompletionsResource:
     def create(
         self,
         *,
-        model: str = "falin-01",
-        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        messages: List[Union[Dict[str, Any], ChatMessage]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
         stream: bool = False,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: Optional[List[Union[Dict[str, Any], Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         **extra_params: Any,
     ) -> Union[ChatCompletion, Iterator[ChatCompletionChunk]]:
         """Create a chat or message completion.
 
         Args:
-            model: Model identifier (e.g. 'falin-01', 'falin-pro', 'falin-ultra')
-            messages: List of message dictionaries with 'role' and 'content'
+            model: Model identifier (defaults to client default or 'openai/gpt-oss-120b')
+            messages: List of message dictionaries or ChatMessage objects
             temperature: Sampling temperature (0.0 - 2.0)
             max_tokens: Maximum tokens to generate
             top_p: Nucleus sampling parameter
@@ -157,9 +208,13 @@ class CompletionsResource:
         Returns:
             ChatCompletion object if stream=False, or an iterator of ChatCompletionChunk if stream=True.
         """
+        effective_model = model or getattr(self._client, "default_model", "openai/gpt-oss-120b")
+        norm_messages = _normalize_messages(messages)
+        norm_tools = _normalize_tools(tools)
+
         payload: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
+            "model": effective_model,
+            "messages": norm_messages,
             **extra_params,
         }
         if temperature is not None:
@@ -168,8 +223,8 @@ class CompletionsResource:
             payload["max_tokens"] = max_tokens
         if top_p is not None:
             payload["top_p"] = top_p
-        if tools is not None:
-            payload["tools"] = tools
+        if norm_tools is not None:
+            payload["tools"] = norm_tools
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
         if stream:
@@ -184,12 +239,12 @@ class CompletionsResource:
     def stream(
         self,
         *,
-        model: str = "falin-01",
-        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        messages: List[Union[Dict[str, Any], ChatMessage]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: Optional[List[Union[Dict[str, Any], Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         **extra_params: Any,
     ) -> StreamManager:
@@ -263,20 +318,24 @@ class AsyncCompletionsResource:
     async def create(
         self,
         *,
-        model: str = "falin-01",
-        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        messages: List[Union[Dict[str, Any], ChatMessage]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
         stream: bool = False,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: Optional[List[Union[Dict[str, Any], Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         **extra_params: Any,
     ) -> Union[ChatCompletion, AsyncIterator[ChatCompletionChunk]]:
         """Create an asynchronous chat completion."""
+        effective_model = model or getattr(self._client, "default_model", "openai/gpt-oss-120b")
+        norm_messages = _normalize_messages(messages)
+        norm_tools = _normalize_tools(tools)
+
         payload: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
+            "model": effective_model,
+            "messages": norm_messages,
             **extra_params,
         }
         if temperature is not None:
@@ -285,8 +344,8 @@ class AsyncCompletionsResource:
             payload["max_tokens"] = max_tokens
         if top_p is not None:
             payload["top_p"] = top_p
-        if tools is not None:
-            payload["tools"] = tools
+        if norm_tools is not None:
+            payload["tools"] = norm_tools
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
         if stream:
@@ -301,12 +360,12 @@ class AsyncCompletionsResource:
     def stream(
         self,
         *,
-        model: str = "falin-01",
-        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        messages: List[Union[Dict[str, Any], ChatMessage]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: Optional[List[Union[Dict[str, Any], Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         **extra_params: Any,
     ) -> AsyncStreamManager:

@@ -8,9 +8,11 @@ from cortiqa.client import Cortiqa, AsyncCortiqa
 from cortiqa.exceptions import (
     CortiqaError,
     APIError,
+    BadRequestError,
     AuthenticationError,
     PermissionDeniedError,
     NotFoundError,
+    UnprocessableEntityError,
     RateLimitError,
     InternalServerError,
     APIConnectionError,
@@ -24,6 +26,10 @@ from cortiqa.types.chat import (
     ChatCompletionChunkChoice,
     ChatCompletionChunkDelta,
     Usage,
+    Tool,
+    FunctionDefinition,
+    ToolCall,
+    FunctionCall,
 )
 from cortiqa.types.models import ModelInfo, ModelListResponse
 
@@ -33,9 +39,11 @@ __all__ = [
     "AsyncCortiqa",
     "CortiqaError",
     "APIError",
+    "BadRequestError",
     "AuthenticationError",
     "PermissionDeniedError",
     "NotFoundError",
+    "UnprocessableEntityError",
     "RateLimitError",
     "InternalServerError",
     "APIConnectionError",
@@ -47,6 +55,10 @@ __all__ = [
     "ChatCompletionChunkChoice",
     "ChatCompletionChunkDelta",
     "Usage",
+    "Tool",
+    "FunctionDefinition",
+    "ToolCall",
+    "FunctionCall",
     "ModelInfo",
     "ModelListResponse",
 ]

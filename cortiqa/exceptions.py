@@ -19,13 +19,25 @@ class APIError(CortiqaError):
         message: str,
         status_code: Optional[int] = None,
         body: Optional[Any] = None,
+        *,
+        param: Optional[str] = None,
+        code: Optional[str] = None,
+        error_type: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.body = body
+        self.param = param
+        self.code = code
+        self.error_type = error_type
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(status_code={self.status_code}, message={self.message!r})"
+        param_str = f", param={self.param!r}" if self.param else ""
+        return f"{self.__class__.__name__}(status_code={self.status_code}, message={self.message!r}{param_str})"
+
+
+class BadRequestError(APIError):
+    """Exception raised for 400 Bad Request errors (e.g. invalid parameter)."""
 
 
 class AuthenticationError(APIError):
@@ -38,6 +50,10 @@ class PermissionDeniedError(APIError):
 
 class NotFoundError(APIError):
     """Exception raised for 404 Not Found errors."""
+
+
+class UnprocessableEntityError(APIError):
+    """Exception raised for 422 Unprocessable Entity errors (e.g. validation failure)."""
 
 
 class RateLimitError(APIError):
